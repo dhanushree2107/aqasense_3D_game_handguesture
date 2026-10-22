@@ -1,0 +1,894 @@
+"""
+Underwater Treasure Hunt - Core UI Screen Overlays
+Implements:
+1. CameraCheckScreen (Live camera verification, landmark feedback, and gesture test bed)
+2. PauseScreen (In-game pause overlay)
+3. LevelCompleteScreen (Victory fanfare, oxygen bonus tally, and star rating)
+4. GameOverScreen (Oxygen depletion screen with retry)
+5. VictoryScreen (All 5 levels conquered summary)
+"""
+
+import math
+import os
+import time
+from typing import Callable, Dict, List, Optional, Tuple
+import cv2
+import pygame
+
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+
+from config import (
+    COLOR_NEON_TEAL,
+    COLOR_OCEAN_CYAN,
+    COLOR_GOLD,
+    COLOR_CORAL_RED,
+    COLOR_EMERALD,
+    COLOR_AMBER_WARNING,
+    COLOR_PURPLE_MYSTIC,
+    COLOR_WHITE,
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
+)
+from ui.buttons import Button
+from audio.sound_manager import SoundManager
+from hand_tracking.gesture_detector import GestureType
+from ui.underwater_3d_scene import Underwater3DScene
+
+class CameraCheckScreen:
+    """Pre-dive diagnostic screen allowing players to verify webcam and calibrate two-hand swimming and gestures."""
+
+    def __init__(
+        self,
+        on_start_game: Callable[[], None],
+        on_back: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        self.on_start_game = on_start_game
+        self.on_back = on_back
+        self.sound_manager = sound_manager
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 30, bold=True)
+        self.font_sub = pygame.font.SysFont("segoeui", 16)
+        self.font_label = pygame.font.SysFont("segoeui", 17, bold=True)
+        self.font_body = pygame.font.SysFont("segoeui", 13)
+        self.font_check = pygame.font.SysFont("segoeui", 13, bold=True)
+
+        # Interactive Calibration Checklist (Section 35)
+        self.calib = {
+            "cam": False,
+            "both_hands": False,
+            "move_left": False,
+            "move_right": False,
+            "move_up": False,
+            "move_down": False,
+            "pinch": False,
+            "palm": False,
+            "two_fingers": False,
+        }
+        self.prev_x: float = SCREEN_WIDTH / 2.0
+        self.prev_y: float = SCREEN_HEIGHT / 2.0
+
+        btn_w, btn_h = 220, 48
+        self.start_btn = Button(
+            rect=pygame.Rect(SCREEN_WIDTH // 2 + 30, SCREEN_HEIGHT - 70, btn_w, btn_h),
+            text="START ADVENTURE >",
+            on_click=self.on_start_game,
+            sound_manager=self.sound_manager,
+            accent_color=COLOR_EMERALD
+        )
+        self.back_btn = Button(
+            rect=pygame.Rect(SCREEN_WIDTH // 2 - 250, SCREEN_HEIGHT - 70, btn_w, btn_h),
+            text="MAIN MENU",
+            on_click=self.on_back,
+            sound_manager=self.sound_manager,
+            accent_color=COLOR_NEON_TEAL
+        )
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        self.start_btn.update(cursor_x, cursor_y, is_clicked, dt)
+        self.back_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+        # Track motion for calibration
+        dx = cursor_x - self.prev_x
+        dy = cursor_y - self.prev_y
+        if dx < -45.0:
+            self.calib["move_left"] = True
+        elif dx > 45.0:
+            self.calib["move_right"] = True
+        if dy < -40.0:
+            self.calib["move_up"] = True
+        elif dy > 40.0:
+            self.calib["move_down"] = True
+        self.prev_x = cursor_x
+        self.prev_y = cursor_y
+
+    def draw(
+        self,
+        surface: pygame.Surface,
+        raw_frame,
+        camera_available: bool,
+        hand_detected: bool,
+        current_gesture: GestureType,
+        pinch_dist: float,
+        camera_fps: float,
+        num_hands: int = 1,
+        second_gesture: Optional[GestureType] = None,
+    ) -> None:
+        """Renders live camera preview box, status badges, and interactive calibration checklist."""
+        bg_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        bg_surf.fill((6, 16, 32, 245))
+        surface.blit(bg_surf, (0, 0))
+
+        # Update calibration states
+        if camera_available:
+            self.calib["cam"] = True
+        if hand_detected and num_hands >= 2:
+            self.calib["both_hands"] = True
+        if current_gesture == GestureType.PINCH or (second_gesture == GestureType.PINCH):
+            self.calib["pinch"] = True
+        if current_gesture == GestureType.OPEN_PALM or (second_gesture == GestureType.OPEN_PALM):
+            self.calib["palm"] = True
+        if current_gesture == GestureType.TWO_FINGERS or (second_gesture == GestureType.TWO_FINGERS):
+            self.calib["two_fingers"] = True
+
+        # Title
+        t_surf = self.font_title.render("VISION SYSTEM & GESTURE CALIBRATION", True, COLOR_NEON_TEAL)
+        sub_text = "Verify your webcam and complete the 2-hand gesture calibration checklist before diving"
+        s_surf = self.font_sub.render(sub_text, True, (180, 215, 235))
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, 16))
+        surface.blit(s_surf, (SCREEN_WIDTH // 2 - s_surf.get_width() // 2, 52))
+
+        # 1. Left Frame: Live Webcam Preview Feed
+        feed_w, feed_h = 440, 330
+        feed_x = 70
+        feed_y = 95
+        
+        feed_rect = pygame.Rect(feed_x, feed_y, feed_w, feed_h)
+        pygame.draw.rect(surface, (15, 30, 50), feed_rect, border_radius=10)
+        pygame.draw.rect(surface, COLOR_NEON_TEAL, feed_rect, width=2, border_radius=10)
+
+        if raw_frame is not None:
+            try:
+                resized = cv2.resize(raw_frame, (feed_w, feed_h))
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                frame_surface = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+                surface.blit(frame_surface, (feed_x, feed_y))
+            except Exception:
+                pass
+        else:
+            no_cam_text = self.font_label.render("CAMERA FEED OFFLINE", True, COLOR_CORAL_RED)
+            surface.blit(no_cam_text, (feed_x + feed_w // 2 - no_cam_text.get_width() // 2, feed_y + feed_h // 2 - 10))
+
+        # 2. Right Frame: Interactive Gesture Calibration Checklist (Section 35)
+        diag_x = feed_x + feed_w + 40
+        diag_y = feed_y
+        diag_w = SCREEN_WIDTH - diag_x - 70
+        diag_h = feed_h + 100
+
+        d_surf = pygame.Surface((diag_w, diag_h), pygame.SRCALPHA)
+        d_surf.fill((12, 26, 46, 215))
+        pygame.draw.rect(d_surf, (35, 75, 115), (0, 0, diag_w, diag_h), width=2, border_radius=10)
+        surface.blit(d_surf, (diag_x, diag_y))
+
+        # Header
+        h_title = self.font_label.render("INTERACTIVE CALIBRATION CHECKLIST:", True, COLOR_GOLD)
+        surface.blit(h_title, (diag_x + 20, diag_y + 14))
+
+        checklist = [
+            ("Camera Detected", self.calib["cam"]),
+            ("Two Hands Tracked (Left + Right)", self.calib["both_hands"]),
+            ("Move Both Hands LEFT", self.calib["move_left"]),
+            ("Move Both Hands RIGHT", self.calib["move_right"]),
+            ("Move Both Hands UP", self.calib["move_up"]),
+            ("Move Both Hands DOWN", self.calib["move_down"]),
+            ("Right Hand Pinch (Grab)", self.calib["pinch"]),
+            ("Open Palm (Water Current)", self.calib["palm"]),
+            ("Two Fingers (Sonar Scan)", self.calib["two_fingers"]),
+        ]
+
+        for i, (label, is_ok) in enumerate(checklist):
+            cy = diag_y + 44 + i * 26
+            icon = "[OK]" if is_ok else "[  ]"
+            col = COLOR_EMERALD if is_ok else (140, 160, 180)
+            c_surf = self.font_check.render(f"{icon}  {label}", True, col)
+            surface.blit(c_surf, (diag_x + 25, cy))
+
+        # Calibration completion verdict
+        all_done = all(self.calib.values())
+        calib_y = diag_y + diag_h - 75
+        if all_done:
+            msg = "CALIBRATION COMPLETE! START ADVENTURE >"
+            col = COLOR_GOLD
+        else:
+            msg = "Perform missing steps above to verify controls"
+            col = COLOR_NEON_TEAL
+        verdict_surf = self.font_check.render(msg, True, col)
+        surface.blit(verdict_surf, (diag_x + 25, calib_y))
+
+        # Active gestures display badge
+        r_str = f"Right: {current_gesture.value}"
+        l_str = f"Left: {second_gesture.value if second_gesture else 'NONE'}"
+        g_badge = self.font_body.render(f"LIVE SENSOR:  {r_str}  |  {l_str}", True, (200, 230, 255))
+        surface.blit(g_badge, (diag_x + 25, calib_y + 30))
+
+        # Bottom Buttons
+        self.back_btn.draw(surface)
+        self.start_btn.draw(surface)
+
+
+class PauseScreen:
+    """Semi-transparent pause modal with mission resume and restart options."""
+
+    def __init__(
+        self,
+        on_resume: Callable[[], None],
+        on_restart: Callable[[], None],
+        on_menu: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 38, bold=True)
+        self.on_resume = on_resume
+        self.on_restart = on_restart
+        self.on_menu = on_menu
+        self.sound_manager = sound_manager
+
+        btn_w, btn_h = 240, 48
+        cx = SCREEN_WIDTH // 2 - btn_w // 2
+        self.resume_btn = Button(pygame.Rect(cx, 240, btn_w, btn_h), "RESUME MISSION", on_click=self.on_resume, sound_manager=self.sound_manager, accent_color=COLOR_EMERALD)
+        self.restart_btn = Button(pygame.Rect(cx, 310, btn_w, btn_h), "RESTART LEVEL", on_click=self.on_restart, sound_manager=self.sound_manager, accent_color=COLOR_AMBER_WARNING)
+        self.menu_btn = Button(pygame.Rect(cx, 380, btn_w, btn_h), "QUIT TO MENU", on_click=self.on_menu, sound_manager=self.sound_manager, accent_color=COLOR_CORAL_RED)
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        self.resume_btn.update(cursor_x, cursor_y, is_clicked, dt)
+        self.restart_btn.update(cursor_x, cursor_y, is_clicked, dt)
+        self.menu_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        modal_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        modal_surf.fill((5, 12, 25, 215))
+        surface.blit(modal_surf, (0, 0))
+
+        title = self.font_title.render("MISSION PAUSED", True, COLOR_NEON_TEAL)
+        surface.blit(title, (SCREEN_WIDTH // 2 - title.get_width() // 2, 140))
+
+        self.resume_btn.draw(surface)
+        self.restart_btn.draw(surface)
+        self.menu_btn.draw(surface)
+
+
+class LevelCompleteScreen:
+    """Triumphant victory banner displayed upon retrieving all genuine relics (Section 40)."""
+
+    def __init__(
+        self,
+        on_next_level: Callable[[], None],
+        on_menu: Callable[[], None],
+        on_replay: Optional[Callable[[], None]] = None,
+        on_museum: Optional[Callable[[], None]] = None,
+        sound_manager: Optional[SoundManager] = None
+    ):
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 36, bold=True)
+        self.font_label = pygame.font.SysFont("segoeui", 18, bold=True)
+        self.font_data = pygame.font.SysFont("segoeui", 17)
+        self.on_next_level = on_next_level
+        self.on_menu = on_menu
+        self.on_replay = on_replay
+        self.on_museum = on_museum
+        self.sound_manager = sound_manager
+
+        btn_w, btn_h = 175, 46
+        total_btns_w = 4 * btn_w + 3 * 16
+        start_btn_x = SCREEN_WIDTH // 2 - total_btns_w // 2
+        by = 542
+        self.menu_btn = Button(pygame.Rect(start_btn_x + 0 * 191, by, btn_w, btn_h), "MAIN MENU", on_click=self.on_menu, sound_manager=self.sound_manager, accent_color=COLOR_NEON_TEAL)
+        self.museum_btn = Button(pygame.Rect(start_btn_x + 1 * 191, by, btn_w, btn_h), "MUSEUM", on_click=self.on_museum if self.on_museum else self.on_menu, sound_manager=self.sound_manager, accent_color=COLOR_PURPLE_MYSTIC)
+        self.replay_btn = Button(pygame.Rect(start_btn_x + 2 * 191, by, btn_w, btn_h), "REPLAY", on_click=self.on_replay if self.on_replay else self.on_next_level, sound_manager=self.sound_manager, accent_color=COLOR_AMBER_WARNING)
+        self.next_btn = Button(pygame.Rect(start_btn_x + 3 * 191, by, btn_w, btn_h), "NEXT LEVEL >", on_click=self.on_next_level, sound_manager=self.sound_manager, accent_color=COLOR_EMERALD)
+
+        self.buttons = [self.menu_btn, self.museum_btn, self.replay_btn, self.next_btn]
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        for btn in self.buttons:
+            btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+    def draw(
+        self,
+        surface: pygame.Surface,
+        level_name: str,
+        level_score: int,
+        total_score: int,
+        remaining_oxygen: float,
+        best_combo: float = 1.0,
+        side_missions_done: int = 0,
+        total_side_missions: int = 3,
+        stars: int = 3,
+    ) -> None:
+        modal_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        modal_surf.fill((6, 18, 38, 235))
+        surface.blit(modal_surf, (0, 0))
+
+        # Panel Box (spacious and perfectly framing all stats and action buttons)
+        panel_w = 800
+        panel_h = 570
+        px = SCREEN_WIDTH // 2 - panel_w // 2
+        py = 40
+        pygame.draw.rect(surface, (12, 28, 52), (px, py, panel_w, panel_h), border_radius=16)
+        pygame.draw.rect(surface, COLOR_NEON_TEAL, (px, py, panel_w, panel_h), width=2, border_radius=16)
+
+        # Title
+        t_surf = self.font_title.render("EXPEDITION LEVEL COMPLETE!", True, COLOR_GOLD)
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, py + 18))
+
+        sub_surf = self.font_data.render(f"Oceanic Zone Cleared: {level_name}", True, COLOR_OCEAN_CYAN)
+        surface.blit(sub_surf, (SCREEN_WIDTH // 2 - sub_surf.get_width() // 2, py + 58))
+
+        # Stats Tally Grid
+        ox_bonus = int(remaining_oxygen * 5)
+        stats = [
+            ("Relic Points Gathered:", f"+{level_score}"),
+            ("Remaining Oxygen Reserve:", f"{remaining_oxygen:.1f}%"),
+            ("Oxygen Conservation Bonus:", f"+{ox_bonus}"),
+            ("Highest Swim Combo:", f"x{best_combo:.1f} COMBO"),
+            ("Side Missions Completed:", f"{side_missions_done} / {total_side_missions} DONE"),
+            ("Total Cumulative Score:", f"{total_score + ox_bonus:,}"),
+        ]
+
+        for idx, (label, val) in enumerate(stats):
+            l_s = self.font_label.render(label, True, COLOR_WHITE)
+            v_s = self.font_label.render(val, True, COLOR_GOLD if "Score" in label or "Bonus" in label else COLOR_EMERALD)
+            surface.blit(l_s, (px + 60, py + 98 + idx * 35))
+            surface.blit(v_s, (px + panel_w - 60 - v_s.get_width(), py + 98 + idx * 35))
+
+        # Star Rating (Section 40: PERFORMANCE 1-3 stars)
+        star_str = "⭐ " * max(1, min(3, stars))
+        star_surf = pygame.font.SysFont("segoeuiemoji", 32).render(star_str, True, COLOR_GOLD)
+        surface.blit(star_surf, (SCREEN_WIDTH // 2 - star_surf.get_width() // 2, py + 330))
+
+        perf_lbl = self.font_label.render(f"PERFORMANCE RATING ({stars} / 3 STARS)", True, COLOR_WHITE)
+        surface.blit(perf_lbl, (SCREEN_WIDTH // 2 - perf_lbl.get_width() // 2, py + 372))
+
+        for btn in self.buttons:
+            btn.draw(surface)
+
+
+class GameOverScreen:
+    """Screen displayed when oxygen depletes or mission timer expires."""
+
+    def __init__(
+        self,
+        on_retry: Callable[[], None],
+        on_menu: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        self.on_retry = on_retry
+        self.on_menu = on_menu
+        self.sound_manager = sound_manager
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 38, bold=True)
+        self.font_label = pygame.font.SysFont("segoeui", 22, bold=True)
+        self.font_data = pygame.font.SysFont("segoeui", 18)
+
+        panel_w = 640
+        panel_h = 420
+        py = 100
+        btn_w, btn_h = 220, 48
+        by = py + panel_h - btn_h - 24
+        self.menu_btn = Button(pygame.Rect(SCREEN_WIDTH // 2 - btn_w - 15, by, btn_w, btn_h), "MAIN MENU", on_click=self.on_menu, sound_manager=self.sound_manager, accent_color=COLOR_NEON_TEAL)
+        self.retry_btn = Button(pygame.Rect(SCREEN_WIDTH // 2 + 15, by, btn_w, btn_h), "RETRY DIVE", on_click=self.on_retry, sound_manager=self.sound_manager, accent_color=COLOR_AMBER_WARNING)
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        self.retry_btn.update(cursor_x, cursor_y, is_clicked, dt)
+        self.menu_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+    def draw(self, surface: pygame.Surface, reason: str, score: int, level_name: str) -> None:
+        modal_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        modal_surf.fill((25, 6, 8, 235))
+        surface.blit(modal_surf, (0, 0))
+
+        # Panel Box
+        panel_w = 640
+        panel_h = 420
+        px = SCREEN_WIDTH // 2 - panel_w // 2
+        py = 100
+        pygame.draw.rect(surface, (36, 12, 16), (px, py, panel_w, panel_h), border_radius=16)
+        pygame.draw.rect(surface, COLOR_CORAL_RED, (px, py, panel_w, panel_h), width=2, border_radius=16)
+
+        t_surf = self.font_title.render("MISSION FAILED", True, COLOR_CORAL_RED)
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, py + 25))
+
+        sub_surf = self.font_label.render(reason.upper(), True, COLOR_AMBER_WARNING)
+        surface.blit(sub_surf, (SCREEN_WIDTH // 2 - sub_surf.get_width() // 2, py + 78))
+
+        info_lvl = self.font_data.render(f"Expedition Zone: {level_name}", True, (220, 220, 220))
+        surface.blit(info_lvl, (SCREEN_WIDTH // 2 - info_lvl.get_width() // 2, py + 140))
+
+        info_score = self.font_title.render(f"FINAL SCORE: {score:,}", True, COLOR_GOLD)
+        surface.blit(info_score, (SCREEN_WIDTH // 2 - info_score.get_width() // 2, py + 185))
+
+        hint_text = self.font_data.render("Tip: Use Sonar gesture to detect deceptive counterfeits and sea mines!", True, (190, 205, 225))
+        surface.blit(hint_text, (SCREEN_WIDTH // 2 - hint_text.get_width() // 2, py + 245))
+
+        self.menu_btn.draw(surface)
+        self.retry_btn.draw(surface)
+
+
+class VictoryScreen:
+    """Grand finale celebration screen displayed upon finishing all 5 levels."""
+
+    def __init__(
+        self,
+        on_play_again: Callable[[], None],
+        on_menu: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        self.on_play_again = on_play_again
+        self.on_menu = on_menu
+        self.sound_manager = sound_manager
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 38, bold=True)
+        self.font_sub = pygame.font.SysFont("segoeui", 22, bold=True)
+        self.font_label = pygame.font.SysFont("segoeui", 18)
+
+        panel_w = 720
+        panel_h = 490
+        py = 60
+        btn_w, btn_h = 240, 48
+        by = py + panel_h - btn_h - 24
+        self.menu_btn = Button(pygame.Rect(SCREEN_WIDTH // 2 - btn_w - 15, by, btn_w, btn_h), "MAIN MENU", on_click=self.on_menu, sound_manager=self.sound_manager, accent_color=COLOR_NEON_TEAL)
+        self.again_btn = Button(pygame.Rect(SCREEN_WIDTH // 2 + 15, by, btn_w, btn_h), "EXPLORE AGAIN", on_click=self.on_play_again, sound_manager=self.sound_manager, accent_color=COLOR_GOLD)
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        self.again_btn.update(cursor_x, cursor_y, is_clicked, dt)
+        self.menu_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+    def draw(self, surface: pygame.Surface, total_score: int) -> None:
+        modal_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        modal_surf.fill((6, 20, 36, 240))
+        surface.blit(modal_surf, (0, 0))
+
+        # Victory Panel
+        panel_w = 720
+        panel_h = 490
+        px = SCREEN_WIDTH // 2 - panel_w // 2
+        py = 60
+        pygame.draw.rect(surface, (14, 30, 58), (px, py, panel_w, panel_h), border_radius=18)
+        pygame.draw.rect(surface, COLOR_GOLD, (px, py, panel_w, panel_h), width=3, border_radius=18)
+
+        t_surf = self.font_title.render("EXPEDITION VICTORIOUS!", True, COLOR_GOLD)
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, py + 25))
+
+        sub_surf = self.font_sub.render("All 5 Oceanic Zones Conquered", True, COLOR_NEON_TEAL)
+        surface.blit(sub_surf, (SCREEN_WIDTH // 2 - sub_surf.get_width() // 2, py + 75))
+
+        # Title Award
+        award_title = "MASTER ABYSSAL ARCHAEOLOGIST"
+        aw_surf = self.font_sub.render(f"RANK: {award_title}", True, COLOR_EMERALD)
+        surface.blit(aw_surf, (SCREEN_WIDTH // 2 - aw_surf.get_width() // 2, py + 130))
+
+        score_s = self.font_title.render(f"FINAL SCORE: {total_score:,}", True, COLOR_WHITE)
+        surface.blit(score_s, (SCREEN_WIDTH // 2 - score_s.get_width() // 2, py + 185))
+
+        desc_lines = [
+            "You have recovered the sacred crown from the Sunken Temple of the Ancients.",
+            "Your vision-guided precision outsmarted deceptive counterfeits and dangerous naval mines.",
+            "A legendary achievement in underwater robotics and computer vision!"
+        ]
+        for idx, line in enumerate(desc_lines):
+            l_s = self.font_label.render(line, True, (200, 225, 245))
+            surface.blit(l_s, (SCREEN_WIDTH // 2 - l_s.get_width() // 2, py + 260 + idx * 28))
+
+        self.menu_btn.draw(surface)
+        self.again_btn.draw(surface)
+
+
+class LevelSelectScreen:
+    """Attractive level selection screen showing unlocked oceanic zones and objectives."""
+
+    def __init__(
+        self,
+        on_select_level: Callable[[int], None],
+        on_back: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        self.on_select_level = on_select_level
+        self.on_back = on_back
+        self.sound_manager = sound_manager
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 32, bold=True)
+        self.font_sub = pygame.font.SysFont("segoeui", 16)
+        self.font_card_title = pygame.font.SysFont("segoeui", 13, bold=True)
+        self.font_card_sub = pygame.font.SysFont("segoeui", 10)
+        self.font_badge_num = pygame.font.SysFont("segoeui", 15, bold=True)
+        self.font_badge = pygame.font.SysFont("segoeui", 11, bold=True)
+        self.font_card_desc = pygame.font.SysFont("segoeui", 11)
+
+        self.buttons = []
+        self.card_dwells = {i: 0.0 for i in range(1, 6)}
+
+        # Card layout dimensions
+        self.card_w = 226
+        self.card_h = 470
+        self.start_x = 40
+        self.spacing = 246
+        self.card_y = 110
+        self.thumb_h = 148
+
+        # Display metadata matching reference aesthetics
+        self.level_meta = {
+            1: {
+                "title": "Level 1 - Shallow Ocean",
+                "subtitle": "Coral, fish, easy exploration",
+                "depth": "10M DEPTH",
+                "biome": "SUNLIT REEF",
+            },
+            2: {
+                "title": "Level 2 - Coral Reef",
+                "subtitle": "Vibrant reef, schooling fish",
+                "depth": "35M DEPTH",
+                "biome": "TWILIGHT ZONE",
+            },
+            3: {
+                "title": "Level 3 - Deep Ocean",
+                "subtitle": "Sunken ships, deeper trenches",
+                "depth": "85M DEPTH",
+                "biome": "MIDNIGHT TRENCH",
+            },
+            4: {
+                "title": "Level 4 - Sunken Galleon",
+                "subtitle": "Galleon hull, ancient secrets",
+                "depth": "160M DEPTH",
+                "biome": "ABYSSAL WRECK",
+            },
+            5: {
+                "title": "Level 5 - Temple of Atlantis",
+                "subtitle": "Sacred ruins, mystical vault",
+                "depth": "300M DEPTH",
+                "biome": "HADAL VAULT",
+            },
+        }
+
+        # Load cinematic level thumbnails
+        self.level_thumbs = {}
+        for lvl_id in range(1, 6):
+            thumb_path = os.path.join(ASSETS_DIR, f"level{lvl_id}_thumb.jpg")
+            if os.path.isfile(thumb_path):
+                try:
+                    raw_img = pygame.image.load(thumb_path)
+                    self.level_thumbs[lvl_id] = pygame.transform.smoothscale(raw_img, (self.card_w, self.thumb_h))
+                except Exception:
+                    self.level_thumbs[lvl_id] = None
+            else:
+                self.level_thumbs[lvl_id] = None
+
+        self._init_buttons()
+
+    def _init_buttons(self) -> None:
+        btn_w, btn_h = 240, 46
+        self.back_btn = Button(
+            pygame.Rect(SCREEN_WIDTH // 2 - btn_w // 2, SCREEN_HEIGHT - 65, btn_w, btn_h),
+            "MAIN MENU",
+            on_click=self.on_back,
+            sound_manager=self.sound_manager,
+            accent_color=COLOR_NEON_TEAL
+        )
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float, unlocked_levels: int, completed_levels: set) -> None:
+        self.back_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+        # Check level cards click / pinch or hover dwell (0.50s steady point)
+        for lvl_id in range(1, 6):
+            cx = self.start_x + (lvl_id - 1) * self.spacing
+            btn_rect = pygame.Rect(cx + 16, self.card_y + self.card_h - 52, self.card_w - 32, 40)
+            card_rect = pygame.Rect(cx, self.card_y, self.card_w, self.card_h)
+            is_unlocked = (lvl_id <= unlocked_levels)
+
+            is_hovered = is_unlocked and (btn_rect.collidepoint(cursor_x, cursor_y) or card_rect.collidepoint(cursor_x, cursor_y))
+            if is_hovered:
+                self.card_dwells[lvl_id] += dt
+            else:
+                self.card_dwells[lvl_id] = max(0.0, self.card_dwells[lvl_id] - dt * 2.0)
+
+            dwell_trigger = (self.card_dwells[lvl_id] >= 0.50)
+
+            if is_unlocked and (btn_rect.collidepoint(cursor_x, cursor_y) or card_rect.collidepoint(cursor_x, cursor_y)) and (is_clicked or dwell_trigger):
+                if self.sound_manager:
+                    self.sound_manager.play('click')
+                self.card_dwells[lvl_id] = 0.0
+                self.on_select_level(lvl_id)
+                break
+
+    def draw(self, surface: pygame.Surface, unlocked_levels: int, completed_levels: set) -> None:
+        bg_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        bg_surf.fill((6, 14, 28, 245))
+        surface.blit(bg_surf, (0, 0))
+
+        # Title and Subtitle
+        t_surf = self.font_title.render("EXPEDITION ZONE SELECT", True, COLOR_GOLD)
+        s_surf = self.font_sub.render("Choose an oceanic depth layer to explore and recover ancient relics", True, COLOR_OCEAN_CYAN)
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, 22))
+        surface.blit(s_surf, (SCREEN_WIDTH // 2 - s_surf.get_width() // 2, 64))
+
+        from config import LEVELS
+
+        for lvl_id in range(1, 6):
+            cfg = LEVELS[lvl_id]
+            meta = self.level_meta[lvl_id]
+            cx = self.start_x + (lvl_id - 1) * self.spacing
+            is_unlocked = (lvl_id <= unlocked_levels)
+            is_completed = (lvl_id in completed_levels)
+
+            # 1. Base card container
+            c_surf = pygame.Surface((self.card_w, self.card_h), pygame.SRCALPHA)
+            bg_col = (12, 26, 48, 235) if is_unlocked else (12, 18, 28, 210)
+            c_surf.fill(bg_col)
+            border_col = COLOR_GOLD if is_completed else (COLOR_NEON_TEAL if is_unlocked else (40, 56, 76))
+            pygame.draw.rect(c_surf, border_col, (0, 0, self.card_w, self.card_h), width=2, border_radius=14)
+            surface.blit(c_surf, (cx, self.card_y))
+
+            # 2. Thumbnail area
+            thumb_img = self.level_thumbs.get(lvl_id)
+            if thumb_img:
+                surface.blit(thumb_img, (cx, self.card_y))
+
+                # Smooth dark gradient vignette across bottom 56px of thumbnail
+                vig = pygame.Surface((self.card_w, 56), pygame.SRCALPHA)
+                for vy in range(56):
+                    va = int(240 * (vy / 55.0))
+                    pygame.draw.line(vig, (8, 18, 34, va), (0, vy), (self.card_w, vy))
+                surface.blit(vig, (cx, self.card_y + self.thumb_h - 56))
+
+            # Top right status pill
+            status_str = "COMPLETED" if is_completed else ("AVAILABLE" if is_unlocked else "LOCKED")
+            status_col = COLOR_EMERALD if is_completed else (COLOR_GOLD if is_unlocked else (130, 145, 160))
+            sp_surf = pygame.Surface((84, 22), pygame.SRCALPHA)
+            sp_surf.fill((6, 16, 30, 210))
+            pygame.draw.rect(sp_surf, status_col, (0, 0, 84, 22), width=1, border_radius=6)
+            st_text = self.font_badge.render(status_str, True, status_col)
+            sp_surf.blit(st_text, (42 - st_text.get_width() // 2, 11 - st_text.get_height() // 2))
+            surface.blit(sp_surf, (cx + self.card_w - 90, self.card_y + 8))
+
+            # Circular cyan badge with level number (Exact User Reference!)
+            bcx = cx + 22
+            bcy = self.card_y + self.thumb_h - 22
+            pygame.draw.circle(surface, (0, 155, 245), (bcx, bcy), 15)
+            pygame.draw.circle(surface, (80, 220, 255), (bcx, bcy), 15, 2)
+            b_num = self.font_badge_num.render(str(lvl_id), True, COLOR_WHITE)
+            surface.blit(b_num, (bcx - b_num.get_width() // 2, bcy - b_num.get_height() // 2))
+
+            # Title & Subtitle beside circular badge
+            tx = cx + 43
+            t_line = self.font_card_title.render(meta["title"], True, COLOR_WHITE)
+            s_line = self.font_card_sub.render(meta["subtitle"], True, (185, 220, 248))
+            surface.blit(t_line, (tx, self.card_y + self.thumb_h - 36))
+            surface.blit(s_line, (tx, self.card_y + self.thumb_h - 18))
+
+            # If locked, overlay lock shadow
+            if not is_unlocked:
+                lock_cover = pygame.Surface((self.card_w, self.thumb_h), pygame.SRCALPHA)
+                lock_cover.fill((8, 14, 22, 185))
+                surface.blit(lock_cover, (cx, self.card_y))
+
+            # 3. Card Body Info
+            body_y = self.card_y + self.thumb_h + 12
+
+            # Biome & Depth Tag
+            tag_str = f"{meta['biome']}  •  {meta['depth']}"
+            tag_s = self.font_badge.render(tag_str, True, (110, 180, 230) if is_unlocked else (90, 110, 130))
+            surface.blit(tag_s, (cx + 14, body_y))
+
+            # Goal Banner
+            g_rect = pygame.Rect(cx + 12, body_y + 24, self.card_w - 24, 28)
+            pygame.draw.rect(surface, (18, 44, 72) if is_unlocked else (16, 24, 34), g_rect, border_radius=6)
+            pygame.draw.rect(surface, (36, 88, 136) if is_unlocked else (30, 42, 56), g_rect, width=1, border_radius=6)
+            g_str = f"GOAL: DEPOSIT {cfg.required_deposits} RELICS"
+            g_surf = self.font_badge.render(g_str, True, COLOR_GOLD if is_unlocked else (110, 125, 140))
+            surface.blit(g_surf, (g_rect.centerx - g_surf.get_width() // 2, g_rect.centery - g_surf.get_height() // 2))
+
+            # Stats Row (Time & Target Score)
+            stat_str = f"OXYGEN: {int(cfg.time_limit)}s   •   SCORE: {cfg.target_score}"
+            st_s = self.font_card_desc.render(stat_str, True, (170, 205, 235) if is_unlocked else (90, 105, 120))
+            surface.blit(st_s, (cx + self.card_w // 2 - st_s.get_width() // 2, body_y + 60))
+
+            # Description wrapped
+            words = cfg.description.split(" ")
+            line = ""
+            desc_y = body_y + 86
+            for w in words:
+                test = f"{line} {w}".strip()
+                if self.font_card_desc.size(test)[0] < self.card_w - 28:
+                    line = test
+                else:
+                    ds = self.font_card_desc.render(line, True, (160, 190, 215) if is_unlocked else (80, 95, 110))
+                    surface.blit(ds, (cx + 14, desc_y))
+                    desc_y += 16
+                    line = w
+            if line:
+                ds = self.font_card_desc.render(line, True, (160, 190, 215) if is_unlocked else (80, 95, 110))
+                surface.blit(ds, (cx + 14, desc_y))
+
+            # 4. Action Button
+            btn_rect = pygame.Rect(cx + 16, self.card_y + self.card_h - 52, self.card_w - 32, 40)
+            if is_unlocked:
+                pygame.draw.rect(surface, (18, 56, 98), btn_rect, border_radius=8)
+                pygame.draw.rect(surface, border_col, btn_rect, width=2, border_radius=8)
+                btn_lbl = self.font_badge.render("DIVE IN  >", True, COLOR_WHITE)
+                surface.blit(btn_lbl, (btn_rect.centerx - btn_lbl.get_width() // 2, btn_rect.centery - btn_lbl.get_height() // 2))
+
+                # Dwell progress meter (filling up when pointing at card)
+                if self.card_dwells[lvl_id] > 0:
+                    pct = min(1.0, max(0.0, self.card_dwells[lvl_id] / 0.50))
+                    bar_w = int((btn_rect.width - 8) * pct)
+                    if bar_w > 0:
+                        pygame.draw.rect(surface, COLOR_GOLD, (btn_rect.left + 4, btn_rect.bottom - 4, bar_w, 3), border_radius=2)
+            else:
+                pygame.draw.rect(surface, (18, 24, 34), btn_rect, border_radius=8)
+                pygame.draw.rect(surface, (35, 48, 64), btn_rect, width=1, border_radius=8)
+                btn_lbl = self.font_badge.render("[ LOCKED ]", True, (100, 115, 130))
+                surface.blit(btn_lbl, (btn_rect.centerx - btn_lbl.get_width() // 2, btn_rect.centery - btn_lbl.get_height() // 2))
+
+            # Re-stroke the outer card border so top corners are crisp and framed
+            pygame.draw.rect(surface, border_col, (cx, self.card_y, self.card_w, self.card_h), width=2, border_radius=14)
+
+        self.back_btn.draw(surface)
+
+
+class ChallengeScreen:
+    """Displays high-stakes abyssal challenges with glassmorphic cards and hover dwell."""
+
+    def __init__(
+        self,
+        on_start_challenge: Callable[[int], None],
+        on_back: Callable[[], None],
+        sound_manager: Optional[SoundManager] = None
+    ):
+        self.on_start_challenge = on_start_challenge
+        self.on_back = on_back
+        self.sound_manager = sound_manager
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self.font_title = pygame.font.SysFont("segoeui", 34, bold=True)
+        self.font_sub = pygame.font.SysFont("segoeui", 17)
+        self.font_card_title = pygame.font.SysFont("segoeui", 18, bold=True)
+        self.font_card_sub = pygame.font.SysFont("segoeui", 13, bold=True)
+        self.font_card_desc = pygame.font.SysFont("segoeui", 12)
+        self.font_badge = pygame.font.SysFont("segoeui", 13, bold=True)
+        self.font_icon = pygame.font.SysFont("segoeuiemoji", 28)
+
+        self.card_dwells = {i: 0.0 for i in (1, 2, 3)}
+        btn_w, btn_h = 240, 48
+        self.back_btn = Button(
+            pygame.Rect(SCREEN_WIDTH // 2 - btn_w // 2, SCREEN_HEIGHT - 70, btn_w, btn_h),
+            "MAIN MENU",
+            on_click=self.on_back,
+            sound_manager=self.sound_manager,
+            accent_color=COLOR_NEON_TEAL
+        )
+
+    def update(self, cursor_x: int, cursor_y: int, is_clicked: bool, dt: float) -> None:
+        self.back_btn.update(cursor_x, cursor_y, is_clicked, dt)
+
+        card_w = 340
+        card_h = 360
+        start_x = (SCREEN_WIDTH - (3 * card_w + 2 * 30)) // 2
+        spacing = card_w + 30
+        card_y = 135
+
+        for cid in (1, 2, 3):
+            cx = start_x + (cid - 1) * spacing
+            btn_rect = pygame.Rect(cx + 20, card_y + card_h - 55, card_w - 40, 40)
+            card_rect = pygame.Rect(cx, card_y, card_w, card_h)
+
+            is_hovered = (btn_rect.collidepoint(cursor_x, cursor_y) or card_rect.collidepoint(cursor_x, cursor_y))
+            if is_hovered:
+                self.card_dwells[cid] += dt
+            else:
+                self.card_dwells[cid] = max(0.0, self.card_dwells[cid] - dt * 2.0)
+
+            dwell_trigger = (self.card_dwells[cid] >= 0.50)
+            if is_hovered and (is_clicked or dwell_trigger):
+                if self.sound_manager:
+                    self.sound_manager.play('click')
+                self.card_dwells[cid] = 0.0
+                self.on_start_challenge(cid)
+                break
+
+    def draw(self, surface: pygame.Surface) -> None:
+        bg_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        bg_surf.fill((6, 14, 30, 245))
+        surface.blit(bg_surf, (0, 0))
+
+        # Title
+        t_surf = self.font_title.render("EXPEDITION CHALLENGES", True, COLOR_GOLD)
+        s_surf = self.font_sub.render("High-stakes abyssal trials testing your computer vision reflexes and precision", True, COLOR_OCEAN_CYAN)
+        surface.blit(t_surf, (SCREEN_WIDTH // 2 - t_surf.get_width() // 2, 25))
+        surface.blit(s_surf, (SCREEN_WIDTH // 2 - s_surf.get_width() // 2, 72))
+
+        from config import CHALLENGES
+
+        card_w = 340
+        card_h = 360
+        start_x = (SCREEN_WIDTH - (3 * card_w + 2 * 30)) // 2
+        spacing = card_w + 30
+        card_y = 135
+
+        for cid in (1, 2, 3):
+            cfg = CHALLENGES[cid]
+            cx = start_x + (cid - 1) * spacing
+            card_rect = pygame.Rect(cx, card_y, card_w, card_h)
+
+            # Card background
+            c_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            c_surf.fill((14, 26, 48, 220))
+            pygame.draw.rect(c_surf, cfg.accent_color, (0, 0, card_w, card_h), width=2, border_radius=14)
+            surface.blit(c_surf, (cx, card_y))
+
+            # Icon & Badge
+            icon_s = self.font_icon.render(cfg.badge_icon, True, COLOR_WHITE)
+            surface.blit(icon_s, (cx + 20, card_y + 16))
+
+            badge_text = f"TRIAL #{cid}"
+            b_s = self.font_badge.render(badge_text, True, cfg.accent_color)
+            surface.blit(b_s, (cx + 62, card_y + 22))
+
+            # Title
+            t_s = self.font_card_title.render(cfg.title, True, COLOR_WHITE)
+            surface.blit(t_s, (cx + 20, card_y + 56))
+
+            sub_s = self.font_card_sub.render(cfg.subtitle, True, COLOR_NEON_TEAL)
+            surface.blit(sub_s, (cx + 20, card_y + 82))
+
+            # Description wrapped
+            words = cfg.description.split(" ")
+            line = ""
+            line_y = card_y + 112
+            for w in words:
+                test_line = f"{line} {w}".strip()
+                if self.font_card_desc.size(test_line)[0] < card_w - 40:
+                    line = test_line
+                else:
+                    l_s = self.font_card_desc.render(line, True, (190, 215, 235))
+                    surface.blit(l_s, (cx + 20, line_y))
+                    line_y += 18
+                    line = w
+            if line:
+                l_s = self.font_card_desc.render(line, True, (190, 215, 235))
+                surface.blit(l_s, (cx + 20, line_y))
+
+            # Targets bar
+            tgt_text = f"Goal: {cfg.required_deposits} Relics  |  Time: {int(cfg.time_limit)}s"
+            tgt_s = self.font_badge.render(tgt_text, True, COLOR_GOLD)
+            surface.blit(tgt_s, (cx + 20, card_y + card_h - 90))
+
+            # Action Button
+            btn_rect = pygame.Rect(cx + 20, card_y + card_h - 55, card_w - 40, 40)
+            pygame.draw.rect(surface, (18, 48, 80), btn_rect, border_radius=8)
+            pygame.draw.rect(surface, cfg.accent_color, btn_rect, width=2, border_radius=8)
+            btn_lbl = self.font_badge.render("START CHALLENGE >", True, COLOR_WHITE)
+            surface.blit(btn_lbl, (btn_rect.centerx - btn_lbl.get_width() // 2, btn_rect.centery - btn_lbl.get_height() // 2))
+
+            # Dwell meter
+            if self.card_dwells[cid] > 0:
+                pct = min(1.0, max(0.0, self.card_dwells[cid] / 0.50))
+                bar_w = int((btn_rect.width - 8) * pct)
+                if bar_w > 0:
+                    pygame.draw.rect(surface, COLOR_GOLD, (btn_rect.left + 4, btn_rect.bottom - 4, bar_w, 3), border_radius=2)
+
+        self.back_btn.draw(surface)
+
+
+
+# The photorealistic 3D Underwater Museum experience is modularized in ui/museum.py
+from ui.museum import MuseumScreen, MuseumChamberConfig
