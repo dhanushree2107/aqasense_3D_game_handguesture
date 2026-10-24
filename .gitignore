@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Testing and environments
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Large temporary scratch media files
+scratch/raw_gameplay.mp4
+scratch/full_narration.wav
+scratch/test_video.mp4
+scratch/voice/
+scratch/__pycache__/

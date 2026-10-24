@@ -6,6 +6,9 @@
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10.14-orange.svg)](https://developers.google.com/mediapipe)
 [![OpenCV](https://img.shields.io/badge/OpenCV-5.0-red.svg)](https://opencv.org/)
 [![Tests](https://img.shields.io/badge/Tests-48%20Passed-brightgreen.svg)]()
+[![Walkthrough](https://img.shields.io/badge/Walkthrough-10%20Chapters%20HD-9cf.svg)](GAME_VIDEO_AND_INSTRUCTIONS.md)
+
+> 📹 **Video Walkthrough & Gameplay Guide:** See [`GAME_VIDEO_AND_INSTRUCTIONS.md`](GAME_VIDEO_AND_INSTRUCTIONS.md) and [`AQUASENSE_GAMEPLAY_WALKTHROUGH.mp4`](AQUASENSE_GAMEPLAY_WALKTHROUGH.mp4) for a complete 10-chapter walkthrough with timestamps and visual control guides!
 
 ---
 

@@ -4,31 +4,31 @@
     "unlocked_in_level": 1
   },
   "gold_coin": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "sapphire_chalice": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "ancient_vase": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "heavy_chest": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "ancient_crown": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "guardian_seal": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   },
   "coral_compass": {
-    "is_unlocked": false,
+    "is_unlocked": true,
     "unlocked_in_level": null
   }
 }
